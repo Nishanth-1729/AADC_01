@@ -1,66 +1,76 @@
-import sys
-import os
 import torch
 import torch.nn as nn
-from torchvision import transforms
+from torchvision.transforms import functional as F_vision
+from transformers import DetrImageProcessor, DetrModel, CLIPProcessor, CLIPModel
+from PIL import Image
+import numpy as np
 
-# 1. Force Python to look inside your local cloned folders
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(current_dir, 'detr'))
-sys.path.append(os.path.join(current_dir, 'CLIP'))
-
-# 2. Import directly from your local clones
-import clip
-from models import build_model as build_detr
-import argparse
-
-class LocalDetrClipConnector(nn.Module):
-    def __init__(self, device='cpu'):
+class DetrClipConnector(nn.Module):
+    def __init__(self, detr_name='facebook/detr-resnet-50', clip_name='openai/clip-vit-base-patch32', top_k_boxes=5):
         super().__init__()
-        self.device = device
-        
-        # --- Initialize Local CLIP ---
-        # This loads the model directly from your CLIP folder
-        self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device)
-        self.clip_dim = self.clip_model.visual.output_dim
-        
-        # --- Initialize Local DETR ---
-        # DETR requires this argument namespace to build the architecture locally
-        args = argparse.Namespace(
-            lr_backbone=1e-5, masks=False, backbone='resnet50',
-            dilation=False, position_embedding='sine', hidden_dim=256,
-            dropout=0.1, nheads=8, dim_feedforward=2048, enc_layers=6,
-            dec_layers=6, pre_norm=False, num_classes=91
-        )
-        # Build the model using the local detr/models/ folder
-        self.detr_model, self.criterion, self.postprocessors = build_detr(args)
-        
-        # Load the official pretrained weights into your local architecture
-        checkpoint = torch.hub.load_state_dict_from_url(
-            url='https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth',
-            map_location=self.device, check_hash=True)
-        self.detr_model.load_state_dict(checkpoint['model'])
-        self.detr_model.to(self.device)
-        self.detr_dim = args.hidden_dim
-        
-        # --- Projection Layer (As defined in the paper) ---
-        self.projection = nn.Linear(self.detr_dim, self.clip_dim)
+        self.detr_processor = DetrImageProcessor.from_pretrained(detr_name)
+        self.detr = DetrModel.from_pretrained(detr_name)
+        self.clip_processor = CLIPProcessor.from_pretrained(clip_name)
+        self.clip = CLIPModel.from_pretrained(clip_name)
+        self.top_k_boxes = top_k_boxes
 
     def forward(self, images, text_prompts):
-        # 1. Process through local DETR
-        # DETR expects a list of tensors or a NestedTensor
-        detr_out = self.detr_model(images)
-        # Extract the hidden states (last layer of encoder/decoder)
-        detr_feat = detr_out['pred_logits'] # Simplified extraction for the connection
-        proj_detr = self.projection(detr_feat)
-
-        # 2. Process through local CLIP
-        # Tokenize text prompts using local CLIP tokenizer
-        text_tokens = clip.tokenize(text_prompts).to(self.device)
+        device = next(self.detr.parameters()).device
         
-        # Extract features
+        pil_images = []
+        for img_tensor in images:
+            img_np = (img_tensor.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+            pil_images.append(Image.fromarray(img_np))
+        
+        detr_in = self.detr_processor(images=pil_images, return_tensors="pt")
+        detr_in = {k: v.to(device) for k, v in detr_in.items()}
+        
         with torch.no_grad():
-            img_embed = self.clip_model.encode_image(images)
-            txt_embed = self.clip_model.encode_text(text_tokens)
+            detr_out = self.detr(**detr_in)
+            
+        detr_feat = detr_out.last_hidden_state 
+        
+        batch_patches = []
+        
+        for i in range(len(images)):
+            boxes = detr_out.encoder_last_hidden_state[i, :self.top_k_boxes, :]
+            img = images[i]
+            
+            h, w = img.shape[1], img.shape[2]
+            
+            for j in range(self.top_k_boxes):
+                box_feat = boxes[j]
+                
+                cx = (box_feat[0].item() % 1.0) * w
+                cy = (box_feat[1].item() % 1.0) * h
+                bw = (box_feat[2].item() % 1.0) * w
+                bh = (box_feat[3].item() % 1.0) * h
+                
+                x1 = max(0, int(cx - bw / 2))
+                y1 = max(0, int(cy - bh / 2))
+                x2 = min(w, int(cx + bw / 2))
+                y2 = min(h, int(cy + bh / 2))
+                
+                if x2 <= x1 or y2 <= y1:
+                    patch = img
+                else:
+                    patch = F_vision.crop(img, y1, x1, y2 - y1, x2 - x1)
+                    
+                patch_np = (patch.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+                batch_patches.append(Image.fromarray(patch_np))
+                
+        clip_in_img = self.clip_processor(images=batch_patches, return_tensors="pt")
+        clip_in_img = {k: v.to(device) for k, v in clip_in_img.items()}
+        
+        with torch.no_grad():
+            img_embed = self.clip.get_image_features(**clip_in_img)
+            
+        img_embed = img_embed.view(len(images), self.top_k_boxes, -1).mean(dim=1)
+        
+        clip_in_txt = self.clip_processor(text=text_prompts, return_tensors="pt", padding=True)
+        clip_in_txt = {k: v.to(device) for k, v in clip_in_txt.items()}
+        
+        with torch.no_grad():
+            txt_embed = self.clip.get_text_features(**clip_in_txt)
 
-        return proj_detr, img_embed, txt_embed
+        return detr_feat, img_embed, txt_embed

@@ -5,16 +5,14 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 class AADCDataset(Dataset):
-    def __init__(self, root_dir, transform=None, frames_per_sec=30, num_frames=16):
+    def __init__(self, root_dir, transform=None, num_frames=16):
         self.root_dir = root_dir
         self.transform = transform
-        self.frames_per_sec = frames_per_sec
         self.num_frames = num_frames
         self.video_paths = []
         self.labels = []
         self.categories = ["normal"]
         
-        # Load normal videos
         normal_dir = os.path.join(root_dir, "normal")
         if not os.path.exists(normal_dir):
             normal_dir = os.path.join(root_dir, "Normal")
@@ -26,13 +24,12 @@ class AADCDataset(Dataset):
                         self.video_paths.append(os.path.join(root, video_file))
                         self.labels.append(0)
 
-        # Load abnormal videos from subdirectories
         abnormal_dir = os.path.join(root_dir, "abnormal")
         if not os.path.exists(abnormal_dir):
             abnormal_dir = os.path.join(root_dir, "Abnormal")
             
         if os.path.exists(abnormal_dir):
-            for category in os.listdir(abnormal_dir):
+            for category in sorted(os.listdir(abnormal_dir)):
                 category_path = os.path.join(abnormal_dir, category)
                 if os.path.isdir(category_path):
                     if category not in self.categories:
@@ -59,28 +56,29 @@ class AADCDataset(Dataset):
         
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frames = []
         
-        if total_frames > 0:
-            indices = torch.linspace(0, total_frames - 1, self.num_frames).long()
-            for frame_idx in indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx.item())
-                ret, frame = cap.read()
-                if ret:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_image = Image.fromarray(frame)
-                    if self.transform:
-                        pil_image = self.transform(pil_image)
-                    frames.append(pil_image)
+        indices = set(torch.linspace(0, max(total_frames - 1, 0), self.num_frames).long().tolist())
+        frames = []
+        i = 0
+        
+        while cap.isOpened() and len(frames) < self.num_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if i in indices:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(frame)
+                if self.transform:
+                    pil_image = self.transform(pil_image)
+                frames.append(pil_image)
+            i += 1
         cap.release()
         
-        # Pad if necessary
         while len(frames) < self.num_frames:
             if len(frames) > 0:
-                frames.append(frames[-1])
+                frames.append(frames[-1].clone())
             else:
-                frames.append(torch.zeros((3, 224, 224)))
+                raise ValueError(f"Failed to read any frames from {video_path}")
                 
-        video_tensor = torch.stack(frames) if isinstance(frames[0], torch.Tensor) else torch.zeros((self.num_frames, 3, 224, 224))
-        # Ensure we return a single tensor (e.g. [T, C, H, W])
+        video_tensor = torch.stack(frames)
         return video_tensor, torch.tensor(label, dtype=torch.long)
