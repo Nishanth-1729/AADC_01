@@ -32,11 +32,28 @@ class LearnablePrompt(nn.Module):
         ctx_mask = torch.ones(len(text_labels), self.num_ctx, dtype=attention_mask.dtype, device=device)
         extended_attention_mask = torch.cat([attention_mask[:, 0:1], ctx_mask, attention_mask[:, 1:]], dim=1)
         
+        class PatchedEmbeddings(nn.Module):
+            def __init__(self, orig_emb, custom_embeds):
+                super().__init__()
+                self.orig_emb = orig_emb
+                self.custom_embeds = custom_embeds
+            def forward(self, input_ids=None, position_ids=None, inputs_embeds=None):
+                return self.orig_emb(inputs_embeds=self.custom_embeds, position_ids=position_ids)
+                
+        orig_emb = self.clip_model.text_model.embeddings
+        self.clip_model.text_model.embeddings = PatchedEmbeddings(orig_emb, inputs_embeds)
+        
+        # Pass dummy input_ids to bypass the hardcoded ValueError check in transformers
+        dummy_input_ids = torch.zeros((inputs_embeds.shape[0], inputs_embeds.shape[1]), dtype=torch.long, device=device)
+        
         text_outputs = self.clip_model.text_model(
-            inputs_embeds=inputs_embeds,
+            input_ids=dummy_input_ids,
             attention_mask=extended_attention_mask,
             output_hidden_states=False
         )
+        
+        # Restore the original embeddings
+        self.clip_model.text_model.embeddings = orig_emb
         
         last_hidden_state = text_outputs.last_hidden_state
         eos_indices = input_ids.argmax(dim=-1) + self.num_ctx

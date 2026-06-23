@@ -82,46 +82,49 @@ class AADCDataset(Dataset):
         return len(self.video_paths)
 
     def __getitem__(self, idx):
-        video_path = self.video_paths[idx]
-        label = self.labels[idx]
-        
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # Determine exact frames to decode and count their repetitions
-        target_indices = torch.linspace(0, max(total_frames - 1, 0), self.num_frames).long().tolist()
-        index_counts = Counter(target_indices)
-        
-        frames = []
-        i = 0
-        
-        while cap.isOpened() and len(frames) < self.num_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if i in index_counts:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame)
-                if self.transform:
-                    pil_image = self.transform(pil_image)
-                # Duplicate the frame directly if linspace requires it (e.g. for short videos)
-                for _ in range(index_counts[i]):
-                    frames.append(pil_image)
-            i += 1
-        cap.release()
-        
-        # Ensure we return exactly self.num_frames
-        frames = frames[:self.num_frames]
-        
-        while len(frames) < self.num_frames:
+        # We use a loop to gracefully skip corrupted video files (common in UCF datasets)
+        for _ in range(20):
+            video_path = self.video_paths[idx]
+            label = self.labels[idx]
+            
+            cap = cv2.VideoCapture(video_path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # Determine exact frames to decode and count their repetitions
+            target_indices = torch.linspace(0, max(total_frames - 1, 0), self.num_frames).long().tolist()
+            index_counts = Counter(target_indices)
+            
+            frames = []
+            i = 0
+            
+            while cap.isOpened() and len(frames) < self.num_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if i in index_counts:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(frame)
+                    if self.transform:
+                        pil_image = self.transform(pil_image)
+                    for _ in range(index_counts[i]):
+                        frames.append(pil_image)
+                i += 1
+            cap.release()
+            
+            frames = frames[:self.num_frames]
+            
             if len(frames) > 0:
-                last_frame = frames[-1]
-                if torch.is_tensor(last_frame):
-                    frames.append(last_frame.clone())
-                else:
-                    frames.append(last_frame.copy())
-            else:
-                raise ValueError(f"Failed to read any frames from {video_path}")
+                while len(frames) < self.num_frames:
+                    last_frame = frames[-1]
+                    if torch.is_tensor(last_frame):
+                        frames.append(last_frame.clone())
+                    else:
+                        frames.append(last_frame.copy())
                 
-        video_tensor = torch.stack(frames)
-        return video_tensor, torch.tensor(label, dtype=torch.long)
+                video_tensor = torch.stack(frames)
+                return video_tensor, torch.tensor(label, dtype=torch.long)
+            else:
+                print(f"WARNING: Corrupted video file (0 frames read). Skipping {video_path}")
+                idx = (idx + 1) % len(self.video_paths)
+                
+        raise ValueError("Failed to read frames from too many videos consecutively.")

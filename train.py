@@ -114,7 +114,7 @@ def train_aadc_net(args):
 
 def main():
     parser = argparse.ArgumentParser(description="AADC-Net Training Pipeline")
-    parser.add_argument('--data_dir', type=str, default=r'D:\Video Analytics\UCF Merged', help="Path to normal and abnormal folders")
+    parser.add_argument('--data_dir', type=str, default='/mnt/d/Video Analytics/UCF Merged', help="Path to normal and abnormal folders")
     parser.add_argument('--epochs', type=int, default=10, help="Number of training epochs")
     parser.add_argument('--batch_size', type=int, default=2, help="Batch size for training")
     parser.add_argument('--lr', type=float, default=1e-4, help="Learning rate")
