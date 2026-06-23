@@ -7,7 +7,8 @@ class AADCLoss(nn.Module):
         self.k = k
         self.gamma = gamma
         self.lambda_nce = lambda_nce
-        self.bce = nn.BCELoss()
+        # Switch to BCEWithLogitsLoss for numerical stability (avoiding NaNs from sigmoid saturation)
+        self.bce = nn.BCEWithLogitsLoss()
         self.ce = nn.CrossEntropyLoss()
 
     def get_top_k_scores(self, scores):
@@ -16,8 +17,8 @@ class AADCLoss(nn.Module):
         topk_scores, _ = torch.topk(scores, self.k, dim=1)
         return torch.mean(topk_scores, dim=1)
 
-    def forward(self, anomaly_scores, category_logits, gt_anomaly, gt_category):
-        top_k_anomaly = self.get_top_k_scores(anomaly_scores)
+    def forward(self, anomaly_logits, category_logits, gt_anomaly, gt_category):
+        top_k_anomaly = self.get_top_k_scores(anomaly_logits)
         loss_bce = self.bce(top_k_anomaly, gt_anomaly)
         
         scaled_logits = category_logits * self.gamma
